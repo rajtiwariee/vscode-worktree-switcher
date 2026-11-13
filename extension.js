@@ -1,32 +1,13 @@
 const vscode = require("vscode");
 const os = require("node:os");
-const { execFile } = require("node:child_process");
-const { parseWorktrees, worktreeLabel, branchLabel } = require("./lib");
-
-function runGit(cwd, args) {
-  return new Promise((resolve, reject) =>
-    execFile("git", args, { cwd }, (err, out, stderr) =>
-      err ? reject(new Error(stderr.trim() || err.message)) : resolve(out)
-    )
-  );
-}
-
-const listWorktrees = async (cwd) => parseWorktrees(await runGit(cwd, ["worktree", "list", "--porcelain"]));
+const lib = require("./lib");
+const { samePath, worktreeLabel, branchLabel } = lib;
 
 // Deletes the worktree folder only; its branch is kept. Never offered for the main or current worktree.
-// A detached worktree's commit is safe only if some local or remote branch already contains it.
-async function isOnSomeBranch(cwd, commit) {
-  try {
-    const out = await runGit(cwd, ["for-each-ref", "--count=1", "--contains", commit, "refs/heads", "refs/remotes"]);
-    return out.trim() !== "";
-  } catch {
-    return false; // can't tell -> assume it would be lost
-  }
-}
-
-async function deleteWorktree(cwd, item) {
+async function deleteWorktree(gitPath, cwd, item) {
+  const runGit = (args) => lib.runGit(gitPath, cwd, args);
   const short = item.head.slice(0, 7);
-  const lost = item.detached && !(await isOnSomeBranch(cwd, item.head));
+  const lost = item.detached && !(await lib.isOnSomeBranch(gitPath, cwd, item.head));
   const choice = lost ? "Delete and Lose Commits" : "Delete";
   const ok = await vscode.window.showWarningMessage(
     lost ? `"${item.name}" has commits that are not on any branch.` : `Delete worktree "${item.name}"?`,
@@ -43,7 +24,7 @@ async function deleteWorktree(cwd, item) {
   );
   if (ok !== choice) return;
   try {
-    await runGit(cwd, ["worktree", "remove", item.path]);
+    await runGit(["worktree", "remove", item.path]);
   } catch (err) {
     // Git refuses when there are uncommitted or untracked files; anything else (e.g. locked) is just reported.
     if (!err.message.includes("--force")) {
@@ -57,7 +38,7 @@ async function deleteWorktree(cwd, item) {
     );
     if (force !== "Force Delete") return;
     try {
-      await runGit(cwd, ["worktree", "remove", "--force", item.path]);
+      await runGit(["worktree", "remove", "--force", item.path]);
     } catch (err2) {
       vscode.window.showErrorMessage(`Could not delete worktree: ${err2.message}`);
       return;
@@ -69,7 +50,13 @@ async function deleteWorktree(cwd, item) {
 }
 
 async function activate(context) {
-  const git = (await vscode.extensions.getExtension("vscode.git").activate()).getAPI(1);
+  let git;
+  try {
+    git = (await vscode.extensions.getExtension("vscode.git").activate()).getAPI(1);
+  } catch {
+    return; // ponytail: "git.enabled": false -> stay inactive until next reload
+  }
+  const gitPath = git.git.path;
 
   const wtItem = vscode.window.createStatusBarItem("worktreeSwitcher.worktree", vscode.StatusBarAlignment.Left, 10100);
   wtItem.name = "Worktree";
@@ -79,7 +66,11 @@ async function activate(context) {
   context.subscriptions.push(wtItem);
 
   const mainPaths = new Map(); // repo root -> main worktree path (never changes)
-  const repo = () => git.repositories[0];
+  // The repo of this window's folder, not whichever repo (e.g. a submodule) the git extension found first.
+  const repo = () => {
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    return (folder && git.getRepository(folder.uri)) || git.repositories[0];
+  };
 
   const update = async () => {
     const r = repo();
@@ -89,10 +80,11 @@ async function activate(context) {
     }
     const root = r.rootUri.fsPath;
     if (!mainPaths.has(root)) {
-      const wts = await listWorktrees(root).catch(() => []);
-      mainPaths.set(root, wts[0]?.path ?? root);
+      // Only cache a real answer; a transient git failure must not pin the wrong label forever.
+      const wts = await lib.listWorktrees(gitPath, root).catch(() => []);
+      if (wts[0]) mainPaths.set(root, wts[0].path);
     }
-    wtItem.text = `$(repo) ${worktreeLabel(root, mainPaths.get(root))}`;
+    wtItem.text = `$(repo) ${worktreeLabel(root, mainPaths.get(root) ?? root)}`;
     wtItem.show();
   };
 
@@ -113,7 +105,7 @@ async function activate(context) {
       const root = r.rootUri.fsPath;
       let wts;
       try {
-        wts = await listWorktrees(root);
+        wts = await lib.listWorktrees(gitPath, root);
       } catch (err) {
         vscode.window.showErrorMessage(`git worktree list failed: ${err.message}`);
         return;
@@ -127,29 +119,38 @@ async function activate(context) {
       qp.items = wts.map((wt, i) => {
         const name = worktreeLabel(wt.path, wts[0].path);
         const branch = branchLabel(wt.branch, wt.head);
-        const deletable = i !== 0 && wt.path !== root;
+        const current = samePath(wt.path, root);
+        const deletable = i !== 0 && !current;
+        const home = os.homedir();
+        const shown = wt.path.startsWith(home) ? "~" + wt.path.slice(home.length) : wt.path;
         return {
-          label: `${wt.path === root ? "$(check)" : "$(blank)"} ${name}`,
-          description: `$(git-branch) ${branch}`,
-          detail: wt.path.replace(os.homedir(), "~"),
+          label: `${current ? "$(check)" : "$(blank)"} ${name}`,
+          description: `$(git-branch) ${branch}${wt.locked ? "  $(lock) locked" : ""}`,
+          detail: wt.prunable ? `${shown}  (folder missing)` : shown,
+          current,
+          prunable: !!wt.prunable,
           path: wt.path,
           name,
           branch,
           head: wt.head || "",
           detached: !wt.branch,
-          buttons: deletable ? [newWindowBtn, deleteBtn] : [newWindowBtn],
+          buttons: [...(wt.prunable ? [] : [newWindowBtn]), ...(deletable ? [deleteBtn] : [])],
         };
       });
       const open = (item, forceNewWindow) => {
         qp.hide();
-        if (!item || (item.path === root && !forceNewWindow)) return;
+        if (!item || (item.current && !forceNewWindow)) return;
+        if (item.prunable) {
+          vscode.window.showErrorMessage(`Folder for "${item.name}" no longer exists. Delete it from the list to clean up.`);
+          return;
+        }
         vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(item.path), { forceNewWindow });
       };
       qp.onDidAccept(() => open(qp.selectedItems[0], false));
       qp.onDidTriggerItemButton((e) => {
         if (e.button !== deleteBtn) return open(e.item, true);
         qp.hide();
-        deleteWorktree(root, e.item);
+        deleteWorktree(gitPath, root, e.item);
       });
       qp.onDidHide(() => qp.dispose());
       qp.show();

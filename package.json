@@ -13,7 +13,7 @@
   "engines": { "vscode": "^1.90.0" },
   "main": "./extension.js",
   "files": ["extension.js", "lib.js", "LICENSE"],
-  "scripts": { "vscode:prepublish": "node lib.js" },
+  "scripts": { "test": "node --test test.js", "vscode:prepublish": "node --test test.js" },
   "activationEvents": ["onStartupFinished"],
   "extensionDependencies": ["vscode.git"],
   "contributes": {
