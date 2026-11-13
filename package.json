@@ -1,0 +1,24 @@
+{
+  "name": "worktree-switcher",
+  "displayName": "Worktree Switcher",
+  "description": "Zed-style worktree and branch switcher in the status bar",
+  "publisher": "rajtiwariee",
+  "version": "0.0.1",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/rajtiwariee/vscode-worktree-switcher" },
+  "bugs": { "url": "https://github.com/rajtiwariee/vscode-worktree-switcher/issues" },
+  "homepage": "https://github.com/rajtiwariee/vscode-worktree-switcher#readme",
+  "categories": ["SCM Providers", "Other"],
+  "keywords": ["git", "worktree", "branch", "switcher", "zed"],
+  "engines": { "vscode": "^1.90.0" },
+  "main": "./extension.js",
+  "files": ["extension.js", "lib.js", "LICENSE"],
+  "scripts": { "vscode:prepublish": "node lib.js" },
+  "activationEvents": ["onStartupFinished"],
+  "extensionDependencies": ["vscode.git"],
+  "contributes": {
+    "commands": [
+      { "command": "worktreeSwitcher.pick", "title": "Switch Worktree", "category": "Git" }
+    ]
+  }
+}
